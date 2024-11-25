@@ -1,106 +1,102 @@
 import logging
+import nest_asyncio
+import asyncio
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Включаем логирование
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
+# Применяем nest_asyncio для работы в уже запущенном цикле событий
+nest_asyncio.apply()
 
-# Функция для создания меню
-def create_menu():
+# Глобальные переменные для хранения состояния заказа и статусов
+user_orders = {}
+order_statuses = {}
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
-        ['Отправить заказ', 'Уведомление о доставке'],
-        ['Запрос отзыва', 'Статус заказа'],
-        ['Отправить чертёж']
+        ["Сделать заказ"],
+        ["Проверить статус заказа"],
+        ["Статистика"]
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text('Выберите действие:', reply_markup=reply_markup)
 
 
-# Функция для старта
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Добро пожаловать! Выберите действие:', reply_markup=create_menu())
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_message = update.message.text
+    user_id = update.message.from_user.id
 
-
-# Функция для обработки текстовых сообщений (заказов)
-async def handle_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_choice = update.message.text
-
-    if user_choice == 'Отправить заказ':
-        await update.message.reply_text('Пожалуйста, введите ваш заказ.')
-
-    elif user_choice == 'Уведомление о доставке':
-        await notify_delivery(update, context)
-
-    elif user_choice == 'Запрос отзыва':
-        await request_feedback(update, context)
-
-    elif user_choice == 'Статус заказа':
-        await notify_status(update, context)
-
-    elif user_choice == 'Отправить чертёж':
-        await send_drawing(update, context)
-
+    if user_message == "Сделать заказ":
+        await update.message.reply_text("Введите название товара:")
+        user_orders[user_id] = {"step": "waiting_for_product_name"}
+    elif user_message == "Проверить статус заказа":
+        if user_id in order_statuses:
+            status = order_statuses[user_id]
+            await update.message.reply_text(f"Статус вашего заказа: {status}")
+        else:
+            await update.message.reply_text("У вас нет активных заказов.")
+    elif user_message == "Статистика":
+        await send_statistics(update, context)
     else:
-        await update.message.reply_text(f'Ваш заказ принят: {user_choice}')
+        if user_id in user_orders:
+            if user_orders[user_id]["step"] == "waiting_for_product_name":
+                user_orders[user_id]["product_name"] = user_message
+                user_orders[user_id]["step"] = "waiting_for_quantity"
+                await update.message.reply_text("Введите количество:")
+            elif user_orders[user_id]["step"] == "waiting_for_quantity":
+                quantity = user_message
+                product_name = user_orders[user_id]["product_name"]
+
+                # Сохраняем статус заказа
+                order_statuses[user_id] = f"Заказ на {quantity} единиц(ы) '{product_name}' оформлен."
+
+                await update.message.reply_text(f"Ваш заказ на {quantity} единиц(ы) '{product_name}' оформлен.")
+
+                # Запускаем асинхронную задачу для изменения статуса через минуту
+                asyncio.create_task(change_order_status(user_id, context))
+
+                del user_orders[user_id]  # Удаляем пользователя из состояния после завершения заказа
+        else:
+            await update.message.reply_text("Пожалуйста, выберите действие из меню.")
 
 
-# Функция для обработки документов и изображений
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    file = await update.message.document.get_file()
-    await file.download('user_order_file')
-    await update.message.reply_text('Документ получен!')
+async def send_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Отправляем изображение со статистикой
+    try:
+        with open('statistics.png', 'rb') as photo:
+            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=photo)
+    except FileNotFoundError:
+        await update.message.reply_text("Изображение со статистикой не найдено.")
 
 
-# Функция для уведомления о статусе заказа
-async def notify_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Статус вашего заказа обновлён!')
+async def change_order_status(user_id, context):
+    # Ждем 60 секунд (1 минута)
+    await asyncio.sleep(60)
+
+    # Изменяем статус заказа на "Выполнено"
+    order_statuses[user_id] = "Выполнено"
+
+    # Отправляем уведомление пользователю о завершении заказа
+    await context.bot.send_message(chat_id=user_id, text="Ваш заказ выполнен!")
 
 
-# Функция для отправки чертежей на согласование
-async def send_drawing(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with open('drawing.png', 'rb') as drawing:
-        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=drawing)
-    await update.message.reply_text('Чертёж отправлен на согласование.')
+async def main() -> None:
+    # Замените 'YOUR_TOKEN' на токен вашего бота
+    token = "8063385964:AAG_UUxYA6qgwiVV3gDt_5pEBnPc8mya7Mk"  # Убедитесь, что это правильный токен
+
+    application = ApplicationBuilder().token(token).build()
+
+    application.add_handler(CommandHandler('start', start_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    await application.run_polling()
 
 
-# Функция для уведомления о доставке
-async def notify_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    delivery_status = "Ваш заказ был успешно доставлен!"
-    await update.message.reply_text(delivery_status)
+if __name__ == '__main__':
+    import asyncio
 
-
-# Функция для запроса отзыва от клиента
-async def request_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    feedback_request = "Пожалуйста, оставьте отзыв о нашем сервисе!"
-    await update.message.reply_text(feedback_request)
-
-
-# Основная функция
-
-TOKEN = '8063385964:AAG_UUxYA6qgwiVV3gDt_5pEBnPc8mya7Mk'
-
-app = ApplicationBuilder().token(TOKEN).build()
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_order))
-app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_document))
-
-# Пример команды для уведомления о статусе заказа
-app.add_handler(CommandHandler("status", notify_status))
-
-# Пример команды для отправки чертежа на согласование
-app.add_handler(CommandHandler("send_drawing", send_drawing))
-
-# Команда для уведомления о доставке
-app.add_handler(CommandHandler("notify_delivery", notify_delivery))
-
-# Команда для запроса отзыва от клиента
-app.add_handler(CommandHandler("request_feedback", request_feedback))
-
-app.run_polling()
-
-"""
-git init
-git add RGR.py
-git commit -m "Initial commit"
-"""
+    asyncio.run(main())
